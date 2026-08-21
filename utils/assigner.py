@@ -151,10 +151,6 @@ class TaskAlignedAssigner:
             metrics, self.top_k, dim=-1, largest=True
         )
 
-        if top_k_mask is None:
-            top_k_mask = (top_k_metrics.max(-1, keepdim=True) > self.eps)
-            top_k_mask = top_k_mask.tile([1, 1, self.top_k])
-
         # Mask invalid entries
         top_k_indices = torch.where(top_k_mask, top_k_indices, 0)
 
@@ -165,8 +161,6 @@ class TaskAlignedAssigner:
         is_in_top_k = torch.where(is_in_top_k > 1, 0, is_in_top_k)
         mask_top_k = is_in_top_k.to(metrics.dtype)
 
-        # Combine with in-GT mask
-        mask_in_gts = metrics > 0  # Already filtered
         return mask_top_k * gt_mask
 
     def _resolve_conflicts(self, mask_pos, fg_mask, overlaps, num_max_boxes):

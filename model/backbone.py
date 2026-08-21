@@ -149,7 +149,7 @@ class BackbonePlain(nn.Module):
                 nn.GELU()
             ))
         else:
-            layers.append(RepNeXtDownsample(in_dim // 2, mlp_ratio, deploy))
+            layers.append(RepNeXtDownsample(in_dim, mlp_ratio, deploy))
 
         for _ in range(depth):
             layers.append(RepNeXtBlock(out_dim, kernel_size=7,

@@ -134,6 +134,7 @@ class QRepNeXtHead(nn.Module):
         """Initialize biases for better convergence."""
         for bbox_mod, cls_mod, s in zip(self.bbox_branches, self.cls_branches, self.stride):
             bbox_mod[-1].bias.data[:] = 1.0
+            s = max(float(s), 1.0)
             cls_mod[-1].bias.data[:self.num_classes] = math.log(
                 5 / self.num_classes / (640 / s) ** 2
             )

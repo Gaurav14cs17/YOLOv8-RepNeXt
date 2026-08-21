@@ -76,4 +76,5 @@ class Head(torch.nn.Module):
     def initialize_biases(self):
         for bbox_module, cls_module, s in zip(self.bbox_branch, self.cls_branch, self.stride):
             bbox_module[-1].bias.data[:] = 1.0
+            s = max(float(s), 1.0)
             cls_module[-1].bias.data[:self.num_classes] = math.log(5 / self.num_classes / (640 / s) ** 2)

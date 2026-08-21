@@ -71,6 +71,7 @@ class QYOLORepNeXt(nn.Module, PrunableMixin):
 
         # Copy attributes for compatibility
         self.nc = num_classes
+        self.no = self.head.no
 
     def _forward_once(self, x: torch.Tensor) -> List[torch.Tensor]:
         """Single forward pass for initialization."""
@@ -114,6 +115,7 @@ class QuantizedYOLO(nn.Module):
 
         # Copy attributes from wrapped model for compatibility
         self.nc = model.nc
+        self.no = getattr(model, 'no', model.head.no)
         self.stride = model.stride
         self.head = model.head  # Expose head for loss computation
 
@@ -133,7 +135,7 @@ class QuantizedYOLO(nn.Module):
 
 # Model configurations
 VARIANTS = {
-    'nano': {'dims': [3, 16, 32, 64, 128, 256], 'depths': [1, 1, 1]},
+    'nano': {'dims': [3, 16, 32, 64, 128, 256], 'depths': [1, 2, 2]},
     'tiny': {'dims': [3, 24, 48, 96, 192, 384], 'depths': [1, 2, 2]},
     'small': {'dims': [3, 32, 64, 128, 256, 512], 'depths': [1, 2, 2]},
     'medium': {'dims': [3, 48, 96, 192, 384, 576], 'depths': [2, 4, 4]},

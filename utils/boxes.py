@@ -20,7 +20,8 @@ def scale(coords: torch.Tensor, shape1: tuple, gain: tuple,
     """
     coords[:, [0, 2]] -= pad[0]  # x padding
     coords[:, [1, 3]] -= pad[1]  # y padding
-    coords[:, :4] /= gain[0]  # gain_x == gain_y for letterbox
+    coords[:, [0, 2]] /= gain[0]
+    coords[:, [1, 3]] /= gain[1]
     coords[:, 0].clamp_(0, shape1[1])  # x1
     coords[:, 1].clamp_(0, shape1[0])  # y1
     coords[:, 2].clamp_(0, shape1[1])  # x2

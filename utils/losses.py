@@ -106,8 +106,9 @@ class DFLoss(nn.Module):
             DFL loss
         """
         # Get left and right target bins
-        target_left = target.long()
-        target_right = target_left + 1
+        dfl_ch = pred_dist.shape[-1]
+        target_left = target.long().clamp(0, dfl_ch - 2)
+        target_right = (target_left + 1).clamp(max=dfl_ch - 1)
 
         # Compute weights (how much to weight left vs right)
         weight_left = target_right.float() - target
