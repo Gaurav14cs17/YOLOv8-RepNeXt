@@ -3,6 +3,7 @@
 Handles image loading, caching, and augmentation pipeline.
 """
 
+import hashlib
 import os
 import random
 import cv2
@@ -84,7 +85,7 @@ class Dataset(TorchDataset):
             image, label = self._load_mosaic(index)
 
             # MixUp augmentation
-            if random.random() < params['mix_up']:
+            if random.random() < self.params.get('mix_up', self.params.get('mixup', 0.0)):
                 mix_idx = random.choice(self.indices)
                 image2, label2 = self._load_mosaic(mix_idx)
                 image, label = self.mixup_aug.mix_up(image, label, image2, label2)
@@ -94,7 +95,9 @@ class Dataset(TorchDataset):
 
             # Resize with letterbox
             image, ratio, pad = self.resizer.resize(image, self.input_size, self.augment)
-            shapes = shape, ((h / shape[0], w / shape[1]), pad)
+            pre_ratio = (h / shape[0], w / shape[1])
+            gain = (ratio[0] * pre_ratio[0], ratio[1] * pre_ratio[1])
+            shapes = shape, (gain, pad)
 
             # Transform labels
             label = self.labels[index].copy()
@@ -135,6 +138,8 @@ class Dataset(TorchDataset):
             Tuple of (image, original_shape)
         """
         image = cv2.imread(self.filenames[i])
+        if image is None:
+            raise FileNotFoundError(f'Cannot read image: {self.filenames[i]}')
         h, w = image.shape[:2]
         r = self.input_size / max(h, w)
 
@@ -200,7 +205,8 @@ class Dataset(TorchDataset):
         Returns:
             Dict mapping filename to (labels, shape)
         """
-        cache_path = f'{os.path.dirname(filenames[0])}.cache'
+        cache_id = hashlib.md5(''.join(sorted(filenames)).encode()).hexdigest()[:16]
+        cache_path = f'{os.path.dirname(filenames[0])}.{cache_id}.cache'
 
         if os.path.exists(cache_path):
             return torch.load(cache_path, weights_only=False)

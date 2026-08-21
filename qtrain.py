@@ -59,13 +59,19 @@ class Trainer:
         # Get model variant from params or default to 'nano'
         model_variant = self.params.get('variant', 'nano')
         neck_type = self.params.get('neck_type', 'fpn')
-        self.model = create_qyolo_repnext(model_variant, len(self.params['names']), neck_type)
+        names = self.params['names']
+        num_classes = len(names.values()) if isinstance(names, dict) else len(names)
+        self.model = create_qyolo_repnext(model_variant, num_classes, neck_type)
 
         # Load pretrained weights if available
         weight_file = f'./weights/v8_{model_variant[0]}.pth'
         if os.path.exists(weight_file):
-            state = torch.load(weight_file)['model']
-            self.model.load_state_dict(state.float().state_dict())
+            try:
+                state = torch.load(weight_file, map_location='cpu', weights_only=False)
+                pretrained = state['model'] if isinstance(state, dict) and 'model' in state else state
+                self.model.load_state_dict(pretrained.float().state_dict(), strict=False)
+            except (KeyError, RuntimeError) as exc:
+                print(f'Warning: could not load pretrained weights from {weight_file}: {exc}')
 
         # Prepare for QAT
         self.model.train()
@@ -95,13 +101,15 @@ class Trainer:
 
         # Collect training images
         train_files = self._collect_images(train_dir)
+        train_dataset = Dataset(train_files, self.args.input_size, self.params, True)
         train_sampler = None
         if self.args.distributed:
-            train_sampler = data.distributed.DistributedSampler(train_files)
+            train_sampler = data.distributed.DistributedSampler(train_dataset)
 
         self.train_loader = data.DataLoader(
-            Dataset(train_files, self.args.input_size, self.params, True),
+            train_dataset,
             batch_size=self.args.batch_size,
+            shuffle=(train_sampler is None),
             sampler=train_sampler,
             num_workers=8,
             pin_memory=True,
@@ -120,16 +128,19 @@ class Trainer:
         )
 
     def _collect_images(self, img_dir):
-        """Collect image paths from directory."""
+        """Collect image paths that have matching label files."""
         from pathlib import Path
-        from glob import glob
 
         FORMATS = ('bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp')
         root = Path(img_dir)
+        label_root = Path(str(root).replace(f'{os.sep}images{os.sep}', f'{os.sep}labels{os.sep}'))
         images = []
         for ext in FORMATS:
-            images.extend(glob(str(root / f'**/*.{ext}'), recursive=True))
-            images.extend(glob(str(root / f'**/*.{ext.upper()}'), recursive=True))
+            for pattern in (f'**/*.{ext}', f'**/*.{ext.upper()}'):
+                for img_path in root.glob(pattern):
+                    label_path = label_root / f'{img_path.stem}.txt'
+                    if label_path.exists():
+                        images.append(str(img_path))
         return images
 
     def init_optimizer(self):
@@ -161,7 +172,7 @@ class Trainer:
         )
 
         # Warmup
-        self.num_warmup = max(round(self.params['warmup_epochs'] * len(self.train_loader)), 100)
+        self.num_warmup = max(round(self.params['warmup_epochs'] * len(self.train_loader)), 1000)
 
     def train_epoch(self, epoch):
         """Train for one epoch."""
@@ -171,7 +182,7 @@ class Trainer:
             self.train_loader.sampler.set_epoch(epoch)
 
         # Disable mosaic for last 10 epochs
-        if self.args.epochs - epoch == 10:
+        if self.args.epochs - epoch <= 10:
             self.train_loader.dataset.mosaic = False
 
         pbar = enumerate(self.train_loader)
@@ -183,6 +194,7 @@ class Trainer:
 
         for i, (images, targets, _) in pbar:
             images = images.to(self.device, non_blocking=True).float() / 255.0
+            targets = targets.to(self.device, non_blocking=True)
 
             # Warmup
             self.warmup(i + len(self.train_loader) * epoch)
@@ -248,6 +260,7 @@ class Trainer:
         pbar = tqdm.tqdm(self.val_loader, desc='Validating')
         for images, targets, shapes in pbar:
             images = images.to(device, non_blocking=True).float() / 255.0
+            targets = targets.to(device, non_blocking=True)
             batch_size, _, height, width = images.shape
 
             outputs = model(images)
@@ -325,10 +338,13 @@ class Trainer:
         # Save state_dict (avoids pickling issues with QAT qconfig)
         save_model = model.module if hasattr(model, 'module') else model
         
+        names = self.params['names']
+        num_classes = len(names.values()) if isinstance(names, dict) else len(names)
+
         # Get model config for reconstruction
         config = {
             'variant': self.params.get('variant', 'nano'),
-            'num_classes': len(self.params['names']),
+            'num_classes': num_classes,
             'neck_type': self.params.get('neck_type', 'fpn')
         }
         
@@ -425,8 +441,11 @@ def main():
         trainer.train()
 
     if args.test:
-        model = torch.jit.load('./weights_quant/best.ts')
-        precision, recall, map50, mean_ap = Trainer(args, params).validate(model)
+        trainer = Trainer(args, params)
+        ckpt = torch.load('./weights_quant/best.pt', map_location=trainer.device, weights_only=False)
+        model = trainer.model.module if args.distributed else trainer.model
+        model.load_state_dict(ckpt['state_dict'])
+        precision, recall, map50, mean_ap = trainer.validate(model)
         print(f'\n{"="*50}')
         print(f'  Precision: {precision:.4f} | Recall: {recall:.4f}')
         print(f'  mAP@50: {map50:.4f} | mAP@50-95: {mean_ap:.4f}')

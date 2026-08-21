@@ -343,8 +343,9 @@ def main():
     # Summary
     print("-" * 50)
     print(f"Processed {frame_idx} frames")
-    print(f"Average inference time: {total_time/frame_idx:.1f}ms")
-    print(f"Average FPS: {1000*frame_idx/total_time:.1f}")
+    if frame_idx > 0:
+        print(f"Average inference time: {total_time / frame_idx:.1f}ms")
+        print(f"Average FPS: {1000 * frame_idx / total_time:.1f}")
 
 
 if __name__ == '__main__':

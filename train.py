@@ -23,6 +23,7 @@ from pathlib import Path
 
 import os
 from glob import glob
+from torch.utils import data
 from torch.utils.data import DataLoader
 
 from model import *
@@ -48,7 +49,9 @@ class YoloTrainer:
         self.params = params
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.model = yolo_v8_n(len(params['names'].values())).to(self.device)
+        names = params['names']
+        num_classes = len(names.values()) if isinstance(names, dict) else len(names)
+        self.model = yolo_v8_n(num_classes).to(self.device)
 
         self.accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
         self.params['weight_decay'] *= args.batch_size * args.world_size * self.accumulate / 64
@@ -147,87 +150,92 @@ class YoloTrainer:
         num_batches = len(loader)
         num_warmup_iters = max(round(self.params['warmup_epochs'] * num_batches), 1000)
 
-        with open('weights/step.csv', 'w', newline='') as f_csv:
-            if self.args.local_rank == 0:
-                writer = csv.DictWriter(f_csv, fieldnames=['epoch', 'Precision', 'Recall', 'mAP@50', 'mAP@50-95'])
-                writer.writeheader()
+        f_csv = None
+        writer = None
+        if self.args.local_rank == 0:
+            f_csv = open('weights/step.csv', 'w', newline='')
+            writer = csv.DictWriter(f_csv, fieldnames=['epoch', 'Precision', 'Recall', 'mAP@50', 'mAP@50-95'])
+            writer.writeheader()
 
-            for epoch in range(self.args.epochs):
-                self.model.train()
+        for epoch in range(self.args.epochs):
+            self.model.train()
 
-                if self.args.epochs - epoch <= 10:
-                    loader.dataset.mosaic = False
+            if self.args.epochs - epoch <= 10:
+                loader.dataset.mosaic = False
 
-                if self.args.world_size > 1:
-                    sampler.set_epoch(epoch)
+            if self.args.world_size > 1:
+                sampler.set_epoch(epoch)
 
-                progress_bar = tqdm.tqdm(enumerate(loader), total=num_batches) if self.args.local_rank == 0 else enumerate(loader)
+            progress_bar = tqdm.tqdm(enumerate(loader), total=num_batches) if self.args.local_rank == 0 else enumerate(loader)
 
-                running_loss = AverageMeter()
-                self.optimizer.zero_grad()
+            running_loss = AverageMeter()
+            self.optimizer.zero_grad()
 
-                for i, (images, targets, _) in progress_bar:
-                    iteration = i + epoch * num_batches
-                    images = images.to(self.device).float() / 255.0
-                    targets = targets.to(self.device)
+            for i, (images, targets, _) in progress_bar:
+                iteration = i + epoch * num_batches
+                images = images.to(self.device).float() / 255.0
+                targets = targets.to(self.device)
 
-                    # Warmup
-                    if iteration <= num_warmup_iters:
-                        warmup_ratio = np.interp(iteration, [0, num_warmup_iters], 
-                                               [1, 64 / (self.args.batch_size * self.args.world_size)])
-                        self.accumulate = max(1, round(warmup_ratio))
-                        
-                        for j, group in enumerate(self.optimizer.param_groups):
-                            if j == 0:  # biases
-                                group_lr = np.interp(iteration, [0, num_warmup_iters],
-                                                   [self.params['warmup_bias_lr'],
-                                                   group['initial_lr'] * self._get_lr_lambda()(epoch)])
-                            else:  # weights
-                                group_lr = np.interp(iteration, [0, num_warmup_iters],
-                                                   [0.0,
-                                                   group['initial_lr'] * self._get_lr_lambda()(epoch)])
-                            
-                            group['lr'] = group_lr
-                            if 'momentum' in group:
-                                group['momentum'] = np.interp(iteration, [0, num_warmup_iters],
-                                                            [self.params['warmup_momentum'], 
-                                                            self.params['momentum']])
+                # Warmup
+                if iteration <= num_warmup_iters:
+                    warmup_ratio = np.interp(iteration, [0, num_warmup_iters],
+                                           [1, 64 / (self.args.batch_size * self.args.world_size)])
+                    self.accumulate = max(1, round(warmup_ratio))
 
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(images)
-                        loss = self.criterion(outputs, targets)
+                    for j, group in enumerate(self.optimizer.param_groups):
+                        if j == 0:  # biases
+                            group_lr = np.interp(iteration, [0, num_warmup_iters],
+                                               [self.params['warmup_bias_lr'],
+                                               group['initial_lr'] * self._get_lr_lambda()(epoch)])
+                        else:  # weights
+                            group_lr = np.interp(iteration, [0, num_warmup_iters],
+                                               [0.0,
+                                               group['initial_lr'] * self._get_lr_lambda()(epoch)])
 
-                    running_loss.update(loss.item(), images.size(0))
-                    loss = loss * self.args.batch_size * self.args.world_size
+                        group['lr'] = group_lr
+                        if 'momentum' in group:
+                            group['momentum'] = np.interp(iteration, [0, num_warmup_iters],
+                                                        [self.params['warmup_momentum'],
+                                                        self.params['momentum']])
 
-                    self.scaler.scale(loss).backward()
+                with torch.cuda.amp.autocast():
+                    outputs = self.model(images)
+                    loss = self.criterion(outputs, targets)
 
-                    if iteration % self.accumulate == 0:
-                        self.scaler.unscale_(self.optimizer)
-                        clip_gradients(self.model)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.optimizer.zero_grad()
-                        if self.ema:
-                            self.ema.update(self.model)
+                running_loss.update(loss.item(), images.size(0))
+                loss = loss * self.args.batch_size * self.args.world_size
 
-                    if self.args.local_rank == 0:
-                        mem = torch.cuda.memory_reserved() / 1e9
-                        progress_bar.set_description(f'Epoch [{epoch+1}/{self.args.epochs}] Memory: {mem:.3f}G Loss: {running_loss.avg:.4g}')
+                self.scaler.scale(loss).backward()
 
-                self.scheduler.step()
+                if iteration % self.accumulate == 0:
+                    self.scaler.unscale_(self.optimizer)
+                    clip_gradients(self.model)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
+                    if self.ema:
+                        self.ema.update(self.model)
 
                 if self.args.local_rank == 0:
-                    precision, recall, map50, mean_ap = self.test(model=self.ema.ema if self.ema else self.model)
-                    
-                    # Display metrics table
-                    print(f'\n{"="*60}')
-                    print(f'  Epoch {epoch+1}/{self.args.epochs} | Loss: {running_loss.avg:.4f}')
-                    print(f'  {"─"*56}')
-                    print(f'  Precision: {precision:.4f} | Recall: {recall:.4f}')
-                    print(f'  mAP@50: {map50:.4f} | mAP@50-95: {mean_ap:.4f}')
-                    print(f'{"="*60}\n')
-                    
+                    mem = torch.cuda.memory_reserved() / 1e9
+                    progress_bar.set_description(
+                        f'Epoch [{epoch+1}/{self.args.epochs}] Memory: {mem:.3f}G Loss: {running_loss.avg:.4g}'
+                    )
+
+            self.scheduler.step()
+
+            if self.args.local_rank == 0:
+                precision, recall, map50, mean_ap = self.test(model=self.ema.ema if self.ema else self.model)
+
+                # Display metrics table
+                print(f'\n{"="*60}')
+                print(f'  Epoch {epoch+1}/{self.args.epochs} | Loss: {running_loss.avg:.4f}')
+                print(f'  {"─"*56}')
+                print(f'  Precision: {precision:.4f} | Recall: {recall:.4f}')
+                print(f'  mAP@50: {map50:.4f} | mAP@50-95: {mean_ap:.4f}')
+                print(f'{"="*60}\n')
+
+                if writer is not None:
                     writer.writerow({
                         'epoch': str(epoch + 1).zfill(3),
                         'Precision': f'{precision:.4f}',
@@ -237,20 +245,21 @@ class YoloTrainer:
                     })
                     f_csv.flush()
 
-                    if mean_ap >= self.best_map:
-                        self.best_map = mean_ap
-                        # Save model properly - deepcopy first, then convert to half
-                        save_model = copy.deepcopy(self.ema.ema if self.ema else self.model)
-                        save_model = save_model.cpu().half()
-                        ckpt = {'model': save_model}
-                        torch.save(ckpt, 'weights/best.pt')
-                        del save_model, ckpt
-                    # Save last checkpoint
+                if mean_ap >= self.best_map:
+                    self.best_map = mean_ap
                     save_model = copy.deepcopy(self.ema.ema if self.ema else self.model)
                     save_model = save_model.cpu().half()
                     ckpt = {'model': save_model}
-                    torch.save(ckpt, 'weights/last.pt')
+                    torch.save(ckpt, 'weights/best.pt')
                     del save_model, ckpt
+                save_model = copy.deepcopy(self.ema.ema if self.ema else self.model)
+                save_model = save_model.cpu().half()
+                ckpt = {'model': save_model}
+                torch.save(ckpt, 'weights/last.pt')
+                del save_model, ckpt
+
+        if f_csv is not None:
+            f_csv.close()
 
         if self.args.local_rank == 0:
             strip_optimizer('weights/best.pt')

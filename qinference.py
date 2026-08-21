@@ -91,9 +91,12 @@ class QYOLOInference:
                 # Clean up state_dict from QAT-specific keys and handle prefix
                 state_dict = ckpt['state_dict']
                 cleaned_state_dict = {}
+                QAT_SKIP_KEYS = (
+                    'activation_post_process', 'weight_fake_quant', 'fake_quant',
+                    'observer', 'histogram', 'min_val', 'max_val', 'zero_point',
+                )
                 for k, v in state_dict.items():
-                    # Skip QAT-specific keys
-                    if any(qat_key in k for qat_key in ['activation_post_process', 'weight_fake_quant', 'scale', 'zero_point', 'histogram', 'min_val', 'max_val']):
+                    if any(qat_key in k for qat_key in QAT_SKIP_KEYS):
                         continue
                     # Strip 'model.' prefix if present
                     if k.startswith('model.'):
@@ -440,8 +443,9 @@ def main():
     # Summary
     print("-" * 50)
     print(f"Processed {frame_idx} frames ({mode} mode)")
-    print(f"Average inference time: {total_time/frame_idx:.1f}ms")
-    print(f"Average FPS: {1000*frame_idx/total_time:.1f}")
+    if frame_idx > 0:
+        print(f"Average inference time: {total_time / frame_idx:.1f}ms")
+        print(f"Average FPS: {1000 * frame_idx / total_time:.1f}")
 
 
 if __name__ == '__main__':
