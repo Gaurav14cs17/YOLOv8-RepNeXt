@@ -1,119 +1,106 @@
 # YOLOv8-RepNeXt
 
-Welcome to this PyTorch implementation of YOLOv8 with RepNeXt.
+A PyTorch implementation of YOLOv8 that uses [RepNeXt](https://arxiv.org/abs/2406.16004) blocks in the backbone and neck. The goal is straightforward: train a capable detector, then deploy it with fewer layers and less overhead at inference time.
 
-This project focuses on building a fast and accurate object detection model that’s also easy to train and deploy. It’s based on the RepNeXt paper, which uses a smart idea: during training, the model learns with multiple convolution branches, but at inference time, everything is fused into a single efficient layer.
+![YOLOv8-RepNeXt overview](images/poster_light.png)
 
-#### What does that mean for you?
-   - Better feature learning while training
-   - Faster and lighter inference when deploying
+## Why RepNeXt?
 
-This project is inspired by the [RepNeXt paper](https://arxiv.org/abs/2406.16004) — a clever approach that uses multiple convolutional branches during training but fuses them into a single efficient layer at inference time. The result? You get the best of both worlds: rich feature learning during training and blazing-fast inference.
+RepNeXt uses **structural reparameterization**. During training, each block runs several parallel conv branches (7×7, 5×5, 3×3, 1×1, and identity) so the model can learn from multiple receptive fields. Before deployment, those branches are folded into a single 7×7 convolution.
 
----
+You keep the richer training-time architecture, but inference looks like a standard efficient CNN.
 
-## What Makes This Special?
+![Architecture](images/yolo_architecture_light.png)
 
-The magic lies in **structural reparameterization**. Here's the idea in plain terms:
+### RepNeXt block
 
-- **During training**, the model uses 5 parallel branches (7×7, 5×5, 3×3, 1×1, and identity) to capture features at different scales
-- **During inference**, all those branches get mathematically fused into a single 7×7 convolution
-- **The result**: Same accuracy, way faster inference — no tricks, just math!
+Training uses multiple branches. Inference uses one fused layer.
 
-![YOLOv8-RepNeXt Architecture](images/yolo_architecture.svg)
+![RepNeXt block](images/repnext_block.png)
 
----
+![Reparameterization](images/reparameterization.png)
 
-## RepNeXt Block — The Core Innovation
+### CSP backbone
 
-The RepNeXt block is where the magic happens. During training, it uses multiple parallel branches to learn rich features:
+The backbone uses Cross Stage Partial (CSP) blocks with RepNeXt units for better gradient flow and lower compute cost.
 
-![RepNeXt Block](images/repnext_block.svg)
+![CSP block](images/csp_block.png)
 
-### How Reparameterization Works
+## Quick start
 
-At inference time, all those branches are mathematically fused into a single convolution. No accuracy loss, just pure speed:
+### Requirements
 
-![Reparameterization Process](images/reparameterization.svg)
+Python 3.8+ and a recent PyTorch build. The project also uses:
 
----
+```bash
+pip install numpy tqdm pyyaml torchvision tensorboard opencv-python
+```
 
-## CSP Block Design
+If you have a CUDA-capable GPU, install the matching PyTorch build from [pytorch.org](https://pytorch.org).
 
-We use Cross Stage Partial (CSP) blocks with RepNeXt for better gradient flow and reduced computation:
-
-![CSP Block](images/csp_block.svg)
-
----
-
-## Getting Started
-
-### Installation
-
-Clone the repo and install dependencies:
+### Clone and run
 
 ```bash
 git clone https://github.com/Gaurav14cs17/YOLOv8-RepNeXt.git
 cd YOLOv8-RepNeXt
-pip install -r requirements.txt
 ```
 
-### Your First Model
+A small sample dataset is included under `dataset_mini/`, and `config/config.yml` already points to it. You can train immediately without extra setup.
 
-Creating a model is straightforward:
+### Create a model
 
 ```python
-from model import yolo_v8_n, yolo_v8_s, yolo_v8_m
+from model import yolo_v8_n, yolo_v8_s, yolo_v8_m, yolo_v8_l, yolo_v8_x
 
-# Pick the size that fits your needs
-model = yolo_v8_n(num_classes=80)   # Nano - fastest, good for edge devices
-model = yolo_v8_s(num_classes=80)   # Small - nice balance
-model = yolo_v8_m(num_classes=80)   # Medium - when you need more accuracy
+model = yolo_v8_n(num_classes=80)   # ~2.5M params, fastest
+model = yolo_v8_s(num_classes=80)   # ~8M params, good default
+model = yolo_v8_m(num_classes=80)   # ~17M params
 
-# Test it out
 import torch
 x = torch.randn(1, 3, 640, 640)
 outputs = model(x)
 ```
 
-### Speed Up Inference
+Other variants are available too: `yolo_v8_n_lite`, `yolo_v8_s_lite` (lighter neck), and `yolo_v8_s_bifpn`, `yolo_v8_m_bifpn` (BiFPN neck).
 
-Before deploying, reparameterize the model to fuse all branches:
+### Speed up inference
+
+Call `reparameterize()` once before running predictions:
 
 ```python
 model.eval()
 model.reparameterize()
 
-# Now it's faster!
 with torch.no_grad():
     outputs = model(x)
 ```
 
----
+You can also fuse Conv+BN layers with `model.fuse()`.
 
-## Training Your Own Model
+## Training
 
-### Standard Training
+Standard training:
 
 ```bash
 python train.py --train --epochs 100 --batch-size 16 --input-size 640
 ```
 
-### Quantization-Aware Training
-
-Want to deploy on edge devices? Use QAT for better performance on limited hardware:
+Quantization-aware training (for edge deployment):
 
 ```bash
 python qtrain.py --train --epochs 20 --batch-size 32
 ```
 
-Training outputs are saved to different folders:
-- Standard training → `weights/`
-- Quantized training → `weights_quant/`
+Checkpoints are saved to:
 
-### Dataset Setup
+- `weights/` — standard training
+- `weights_quant/` — quantized training
 
-Organize your data in YOLO format:
+Most hyperparameters live in `config/config.yml`: learning rate, augmentation, class names, and dataset paths.
+
+### Dataset layout
+
+Use YOLO-format labels:
 
 ```
 dataset/
@@ -125,17 +112,17 @@ dataset/
     └── val/
 ```
 
-Each label file should have one line per object:
+Each label file has one object per line:
+
 ```
 class_id x_center y_center width height
 ```
-All coordinates are normalized to 0-1.
 
----
+Coordinates are normalized between 0 and 1. Update the `data:` paths and `names:` section in `config/config.yml` for your dataset.
 
-## Running Inference
+## Inference
 
-### Standard Model
+Standard model:
 
 ```bash
 python inference.py \
@@ -146,7 +133,7 @@ python inference.py \
     --save
 ```
 
-### Quantized Model
+Quantized model:
 
 ```bash
 python qinference.py \
@@ -156,130 +143,53 @@ python qinference.py \
     --save
 ```
 
----
+Useful flags: `--show` to display results, `--output` to change the save directory, and `--no-reparam` if you want to skip branch fusion.
 
-## Model Variants
+## Model variants
 
-Choose based on your speed/accuracy tradeoff:
+| Variant | Approx. params | Notes |
+|---------|----------------|-------|
+| `yolo_v8_n` | ~2.5M | Best for edge / CPU |
+| `yolo_v8_s` | ~8M | Solid default |
+| `yolo_v8_m` | ~17M | More accuracy |
+| `yolo_v8_l` | ~40M | Higher accuracy |
+| `yolo_v8_x` | ~70M | Largest standard model |
+| `*_lite` | same backbone | Lighter neck for mobile |
+| `*_bifpn` | same backbone | BiFPN neck for stronger fusion |
 
-| Variant | Parameters | Use Case |
-|---------|------------|----------|
-| nano | ~3M | Edge devices, real-time on CPU |
-| tiny | ~5M | Mobile devices |
-| small | ~11M | Good balance for most cases |
-| medium | ~26M | When accuracy matters more |
-| large | ~44M | High accuracy applications |
-| xlarge | ~68M | Maximum accuracy |
-
----
-
-## Configuration
-
-All settings live in `config/config.yml`. Here are the key ones:
-
-```yaml
-# Model architecture
-variant: 'small'        # nano, tiny, small, medium, large, xlarge
-neck_type: 'fpn'        # fpn, lite, bifpn
-
-# Training hyperparameters
-lr0: 0.01
-momentum: 0.937
-weight_decay: 0.0005
-epochs: 300
-
-# Data augmentation
-mosaic: 0.5            # Mosaic augmentation probability
-mixup: 0.1             # MixUp augmentation probability
-hsv_h: 0.015           # Hue shift
-hsv_s: 0.7             # Saturation shift
-hsv_v: 0.4             # Value shift
-
-# Your classes
-names:
-  0: person
-  1: bicycle
-  # ... add your classes
-```
-
----
-
-## Project Structure
-
-Here's how the code is organized:
+## Project layout
 
 ```
-YOLOV8-Pytorch/
-├── model/              # Core model architecture
-│   ├── repnext.py      # RepNeXt blocks & reparameterization
-│   ├── backbone.py     # Feature extractor
-│   ├── neck.py         # FPN/PANet for multi-scale fusion
-│   ├── head.py         # Detection head with DFL
-│   └── yolo.py         # Complete YOLO model
-│
-├── qmodel/             # Quantized version for edge deployment
-│   ├── repnext.py      # Quantization-friendly RepNeXt
-│   ├── yolo.py         # Quantized YOLO model
-│   └── pruning.py      # Model pruning utilities
-│
-├── dataloader/         # Data loading & augmentation
-│   ├── dataset.py      # Dataset class
-│   ├── augmentations.py# HSV, Flip, MixUp, etc.
-│   └── mosaic.py       # Mosaic augmentation
-│
-├── utils/              # Helper functions
-│   ├── boxes.py        # Box operations, NMS
-│   ├── metrics.py      # mAP calculation
-│   ├── losses.py       # Loss functions
-│   └── assigner.py     # Label assignment
-│
-├── train.py            # Standard training script
+YOLOv8-RepNeXt/
+├── model/              # Backbone, neck, head, RepNeXt blocks
+├── qmodel/             # Quantized model + pruning helpers
+├── dataloader/         # Dataset loading and augmentation
+├── utils/              # Losses, metrics, NMS, training helpers
+├── config/config.yml   # Training and dataset settings
+├── train.py            # Standard training
 ├── qtrain.py           # Quantization-aware training
-├── inference.py        # Run inference with standard model
-├── qinference.py       # Run inference with quantized model
-└── config/config.yml   # All your settings
+├── inference.py        # Standard inference
+└── qinference.py       # Quantized inference
 ```
 
----
+## What's included
 
-## Features at a Glance
-
-**Architecture**
-- Multi-branch RepNeXt blocks for rich feature learning
-- Structural reparameterization for fast inference
-- Decoupled detection head with DFL
+- RepNeXt backbone and neck with structural reparameterization
+- YOLOv8-style decoupled head with DFL
 - Task-aligned label assignment
+- Mosaic augmentation, EMA, mixed precision, and multi-GPU (DDP) support
+- Quantization-aware training and model pruning utilities
 
-**Training**
-- Mosaic and MixUp augmentation
-- EMA (Exponential Moving Average) for stable training
-- Mixed precision (FP16) support
-- Multi-GPU training with DDP
+## Sample output
 
-**Optimization**
-- Quantization-aware training for edge deployment
-- Model pruning support
-- Conv-BN fusion for faster inference
+![Sample detection](images/image_2.jpg)
 
----
+## References
 
-## Acknowledgments
-
-This project builds on great work from:
-- [YOLO Series Paper](https://arxiv.org/abs/2304.00501) — *"YOLOv1 to YOLOv8, The Rise of Real-Time Object Detection"*
-- [RepNeXt Paper](https://arxiv.org/abs/2406.16004) — *"RepNeXt: A Fast Multi-Scale CNN using Structural Reparameterization"*
-- [RepNeXt GitHub](https://github.com/suous/RepNeXt) — reference implementation
-
----
+- [YOLOv1 to YOLOv8](https://arxiv.org/abs/2304.00501) — survey of the YOLO family
+- [RepNeXt paper](https://arxiv.org/abs/2406.16004) — structural reparameterization
+- [RepNeXt reference code](https://github.com/suous/RepNeXt)
 
 ## License
 
-MIT License — use it however you'd like!
-
----
-
-## Sample Results
-
-![Sample Detection](images/image_2.jpg)
-
-
+MIT
